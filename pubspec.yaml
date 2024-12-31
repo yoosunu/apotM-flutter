@@ -44,6 +44,8 @@ dependencies:
   workmanager: ^0.5.2
   flutter_launcher_icons: ^0.14.1
   flutter_secure_storage: ^9.2.2
+  timezone: ^0.10.0
+  flutter_foreground_task: ^8.17.0
 
 dev_dependencies:
   flutter_test:

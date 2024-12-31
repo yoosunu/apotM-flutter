@@ -1,9 +1,12 @@
-// ignore_for_file: use_build_context_synchronously
+// ignore_for_file: use_build_context_synchronously, non_constant_identifier_names
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
+import 'package:apotm/notification.dart';
 import 'package:apotm/pages/login.dart';
 import 'package:apotm/type.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:http/http.dart' as http;
 
@@ -21,7 +24,73 @@ class _HomePageState extends State<HomePage> {
   int retryCount = 0;
   int todoIndex = 0;
   int EorP = 0; // 0: E, 1: P
+
+  bool isRunningGet = false; // forBG
+  late DateTime timeStampGet; // forBG
+
   List<ITodo> todos = [];
+
+  Future<void> _onReceiveTaskData(Object data) async {
+    if (data is Map<String, dynamic>) {
+      final dynamic timestampMillis = data["timestampMillis"];
+      final bool isRunning = data["IsRunning"];
+      DateTime timestamp =
+          DateTime.fromMillisecondsSinceEpoch(timestampMillis, isUtc: true);
+      setState(() {
+        isRunningGet = isRunning;
+        timeStampGet = timestamp;
+      });
+    }
+  }
+
+  Future<void> _requestPermissions() async {
+    final NotificationPermission notificationPermission =
+        await FlutterForegroundTask.checkNotificationPermission();
+    if (notificationPermission != NotificationPermission.granted) {
+      await FlutterForegroundTask.requestNotificationPermission();
+    }
+
+    if (Platform.isAndroid) {
+      if (!await FlutterForegroundTask.isIgnoringBatteryOptimizations) {
+        await FlutterForegroundTask.requestIgnoreBatteryOptimization();
+      }
+
+      // Use this utility only if you provide services that require long-term survival,
+      // such as exact alarm service, healthcare service, or Bluetooth communication.
+      //
+      // This utility requires the "android.permission.SCHEDULE_EXACT_ALARM" permission.
+      // Using this permission may make app distribution difficult due to Google policy.
+      if (!await FlutterForegroundTask.canScheduleExactAlarms) {
+        // When you call this function, will be gone to the settings page.
+        // So you need to explain to the user why set it.
+        await FlutterForegroundTask.openAlarmsAndRemindersSettings();
+      }
+    }
+  }
+
+  void _initService() {
+    FlutterForegroundTask.init(
+      androidNotificationOptions: AndroidNotificationOptions(
+        channelId: 'apotM foreground_service',
+        channelName: 'apotM Foreground Service Notification',
+        channelDescription:
+            'This notification appears when the apotM foreground service is running.',
+        onlyAlertOnce: true,
+      ),
+      iosNotificationOptions: const IOSNotificationOptions(
+        showNotification: false,
+        playSound: false,
+      ),
+      foregroundTaskOptions: ForegroundTaskOptions(
+        eventAction: ForegroundTaskEventAction.repeat(
+            3600000), // 10분: 600000, 30분: 1800000, 1h: 3600000
+        autoRunOnBoot: true,
+        autoRunOnMyPackageReplaced: true,
+        allowWakeLock: true,
+        allowWifiLock: true,
+      ),
+    );
+  }
 
   Future<void> putDone(int indexOfEandP) async {
     // jwt
@@ -69,14 +138,14 @@ class _HomePageState extends State<HomePage> {
           if (EorP == 0) {
             todos[todoIndex].everydays[indexOfEandP].done =
                 !todos[todoIndex].everydays[indexOfEandP].done;
-            print(!todos[todoIndex].everydays[indexOfEandP].done);
           }
           if (EorP == 1) {
             todos[todoIndex].plans[indexOfEandP].done =
                 !todos[todoIndex].plans[indexOfEandP].done;
-            print(!todos[todoIndex].plans[indexOfEandP].done);
           }
         });
+        await FlutterLocalNotification.cancelNotification(
+            todos[todoIndex].everydays[indexOfEandP].id);
       }
       if (response.statusCode == 401) {
         retryCount++;
@@ -92,20 +161,27 @@ class _HomePageState extends State<HomePage> {
           if (response.statusCode == 200) {
             var newAcData = json.decode(response.body);
             var newAccessToken = newAcData["access_token"];
-            if (newAccessToken != null && newAccessToken.isNotEmpty) {
+            try {
               await storage.write(key: "access_token", value: newAccessToken);
+              setState(() {
+                isLoading = false;
+              });
+            } catch (e) {
+              print('Error occured on putting done at AT');
+              setState(() {
+                isLoading = false;
+              });
+              throw Exception('Error occured on putting done at AT');
             }
-            setState(() {
-              isLoading = false;
-            });
           }
         } catch (e) {
           print("Failed to refresh AT with $e, status: ${response.statusCode}");
+          setState(() {
+            isLoading = false;
+          });
         }
-      }
-      if (response.statusCode != 200 && response.statusCode != 401) {
-        print(
-            'Failed to put with status ${response.statusCode}, error: ${response.request?.url}');
+      } else {
+        print('Error occurred with status ${response.statusCode}');
       }
     } catch (e) {
       print('Failed to change done with $e');
@@ -116,6 +192,7 @@ class _HomePageState extends State<HomePage> {
     if (retryCount > 1) {
       throw Exception("Exceeded maximum retry attempts");
     }
+
     // jwt
     const storage = FlutterSecureStorage();
     String? accessToken = await storage.read(key: "access_token");
@@ -137,13 +214,14 @@ class _HomePageState extends State<HomePage> {
     const url = "https://backend.apot.pro/api/v1/todos";
 
     try {
-      final response = await http.get(
+      var response = await http.get(
         Uri.parse(url),
         headers: {
           'Jwt': '$accessToken',
           'Content-Type': 'application/json',
         },
       );
+      // print(response.statusCode);
       if (response.statusCode == 200) {
         var utf8Body = utf8.decode(response.bodyBytes);
         List<dynamic> jsonData = json.decode(utf8Body);
@@ -152,12 +230,9 @@ class _HomePageState extends State<HomePage> {
           isLoading = false;
         });
       }
-      if (response.statusCode != 200) {
-        retryCount++;
+      if (response.statusCode == 500 || response.statusCode == 401) {
         await storage.delete(key: "access_token");
-        var refreshToken = await storage.read(key: 'refresh_token');
-        // print('RtGet: $refreshToken');
-
+        var refreshToken = await storage.read(key: "refresh_token");
         const String url = "https://backend.apot.pro/api/v1/users/refresh-at";
         try {
           var response = await http.post(
@@ -168,20 +243,39 @@ class _HomePageState extends State<HomePage> {
           if (response.statusCode == 200) {
             var newAcData = json.decode(response.body);
             var newAccessToken = newAcData["access_token"];
-            if (newAccessToken != null && newAccessToken.isNotEmpty) {
+            try {
               await storage.write(key: "access_token", value: newAccessToken);
               return await getTodos();
+            } catch (e) {
+              print('Error occured refreshing AT');
+              throw Exception('Error occured refreshing AT');
             }
-            setState(() {
-              isLoading = false;
-            });
           }
         } catch (e) {
-          print("Failed to refresh AT with $e");
+          print('Error occured during refreshing AT at status 500');
         }
       }
     } catch (e) {
       print('Error fetching data: $e');
+      setState(() {
+        isLoading = false;
+      });
+    }
+    return todos;
+  }
+
+  Future<List<ITodo>> loadAndSetData() async {
+    setState(() {
+      isLoading = true;
+    });
+    try {
+      List<ITodo> data = await getTodos();
+      setState(() {
+        todos = data;
+      });
+    } catch (e) {
+      print('Error loading data: $e');
+    } finally {
       setState(() {
         isLoading = false;
       });
@@ -332,7 +426,14 @@ class _HomePageState extends State<HomePage> {
 
   @override
   void initState() {
-    getTodos();
+    loadAndSetData();
+    FlutterForegroundTask.addTaskDataCallback(_onReceiveTaskData);
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      // Request permissions and initialize the service.
+      _requestPermissions();
+      _initService();
+    });
     super.initState();
   }
 
@@ -342,6 +443,27 @@ class _HomePageState extends State<HomePage> {
       appBar: AppBar(
         backgroundColor: Theme.of(context).colorScheme.inversePrimary,
         title: Text(widget.title),
+        actions: <Widget>[
+          Padding(
+              padding: const EdgeInsets.fromLTRB(0, 0, 20, 0),
+              child: isRunningGet
+                  ? IconButton(
+                      iconSize: 34,
+                      onPressed: () {
+                        FlutterLocalNotification.showNotification(
+                            1, "test", "test message for debugging");
+                      },
+                      icon: const Icon(Icons.toggle_on_rounded),
+                    )
+                  : IconButton(
+                      iconSize: 34,
+                      onPressed: () {
+                        FlutterLocalNotification.showNotification(
+                            1, "test", "test message for debugging");
+                      },
+                      icon: const Icon(Icons.toggle_off_outlined),
+                    ))
+        ],
       ),
       body: isLoading
           ? const Center(child: CircularProgressIndicator())
