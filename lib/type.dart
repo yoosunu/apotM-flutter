@@ -74,3 +74,63 @@ class ITodo {
     );
   }
 }
+
+class IAlarmData {
+  final int id;
+  final String title;
+  final String body;
+
+  IAlarmData({
+    required this.id,
+    required this.title,
+    required this.body,
+  });
+
+  factory IAlarmData.fromJson(Map<String, dynamic> json) {
+    return IAlarmData(
+      id: json['id'],
+      title: json['title'],
+      body: json['body'],
+    );
+  }
+
+  Map<String, dynamic> toJson() {
+    return {
+      'id': id,
+      'title': title,
+      'body': body,
+    };
+  }
+}
+
+class IInitDoneData {
+  final int todoId;
+  final int everydayId;
+  final String name;
+  final String time;
+
+  IInitDoneData({
+    required this.todoId,
+    required this.everydayId,
+    required this.name,
+    required this.time,
+  });
+
+  factory IInitDoneData.fromJson(Map<String, dynamic> json) {
+    return IInitDoneData(
+      todoId: json['todoId'],
+      everydayId: json['everydayId'],
+      name: json['name'],
+      time: json['time'],
+    );
+  }
+
+  Map<String, dynamic> toJson() {
+    return {
+      'todoId': todoId,
+      'everydayId': everydayId,
+      'name': name,
+      'time': time,
+    };
+  }
+}

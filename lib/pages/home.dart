@@ -1,7 +1,8 @@
-// ignore_for_file: use_build_context_synchronously, non_constant_identifier_names
+// ignore_for_file: use_build_context_synchronously, non_constant_identifier_names, avoid_print
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'package:android_alarm_manager_plus/android_alarm_manager_plus.dart';
 import 'package:apotm/notification.dart';
 import 'package:apotm/pages/login.dart';
 import 'package:apotm/type.dart';
@@ -25,20 +26,18 @@ class _HomePageState extends State<HomePage> {
   int todoIndex = 0;
   int EorP = 0; // 0: E, 1: P
 
-  bool isRunningGet = false; // forBG
-  late DateTime timeStampGet; // forBG
+  bool isLoadingGet = true;
+  bool isRunningGet = false;
 
   List<ITodo> todos = [];
 
   Future<void> _onReceiveTaskData(Object data) async {
     if (data is Map<String, dynamic>) {
-      final dynamic timestampMillis = data["timestampMillis"];
       final bool isRunning = data["IsRunning"];
-      DateTime timestamp =
-          DateTime.fromMillisecondsSinceEpoch(timestampMillis, isUtc: true);
+      final bool isLoading = data["IsLoading"];
       setState(() {
         isRunningGet = isRunning;
-        timeStampGet = timestamp;
+        isLoadingGet = isLoading;
       });
     }
   }
@@ -49,20 +48,12 @@ class _HomePageState extends State<HomePage> {
     if (notificationPermission != NotificationPermission.granted) {
       await FlutterForegroundTask.requestNotificationPermission();
     }
-
     if (Platform.isAndroid) {
       if (!await FlutterForegroundTask.isIgnoringBatteryOptimizations) {
         await FlutterForegroundTask.requestIgnoreBatteryOptimization();
       }
 
-      // Use this utility only if you provide services that require long-term survival,
-      // such as exact alarm service, healthcare service, or Bluetooth communication.
-      //
-      // This utility requires the "android.permission.SCHEDULE_EXACT_ALARM" permission.
-      // Using this permission may make app distribution difficult due to Google policy.
       if (!await FlutterForegroundTask.canScheduleExactAlarms) {
-        // When you call this function, will be gone to the settings page.
-        // So you need to explain to the user why set it.
         await FlutterForegroundTask.openAlarmsAndRemindersSettings();
       }
     }
@@ -71,10 +62,10 @@ class _HomePageState extends State<HomePage> {
   void _initService() {
     FlutterForegroundTask.init(
       androidNotificationOptions: AndroidNotificationOptions(
-        channelId: 'apotM foreground_service',
-        channelName: 'apotM Foreground Service Notification',
+        channelId: 'apotM_fg_service',
+        channelName: 'apotM_Fg Service Notification',
         channelDescription:
-            'This notification appears when the apotM foreground service is running.',
+            'This notification appears when the fg service is running.',
         onlyAlertOnce: true,
       ),
       iosNotificationOptions: const IOSNotificationOptions(
@@ -83,9 +74,9 @@ class _HomePageState extends State<HomePage> {
       ),
       foregroundTaskOptions: ForegroundTaskOptions(
         eventAction: ForegroundTaskEventAction.repeat(
-            3600000), // 10분: 600000, 30분: 1800000, 1h: 3600000
-        autoRunOnBoot: true,
-        autoRunOnMyPackageReplaced: true,
+            3600000), // 10분: 600000, 30분: 1800000,
+        autoRunOnBoot: false,
+        autoRunOnMyPackageReplaced: false,
         allowWakeLock: true,
         allowWifiLock: true,
       ),
@@ -144,7 +135,7 @@ class _HomePageState extends State<HomePage> {
                 !todos[todoIndex].plans[indexOfEandP].done;
           }
         });
-        await FlutterLocalNotification.cancelNotification(
+        await AndroidAlarmManager.cancel(
             todos[todoIndex].everydays[indexOfEandP].id);
       }
       if (response.statusCode == 401) {
@@ -159,7 +150,7 @@ class _HomePageState extends State<HomePage> {
             headers: {'Content-Type': 'application/json'},
           );
           if (response.statusCode == 200) {
-            var newAcData = json.decode(response.body);
+            Map<String, dynamic> newAcData = json.decode(response.body);
             var newAccessToken = newAcData["access_token"];
             try {
               await storage.write(key: "access_token", value: newAccessToken);
@@ -180,8 +171,6 @@ class _HomePageState extends State<HomePage> {
             isLoading = false;
           });
         }
-      } else {
-        print('Error occurred with status ${response.statusCode}');
       }
     } catch (e) {
       print('Failed to change done with $e');
@@ -189,6 +178,9 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<List<ITodo>> getTodos() async {
+    setState(() {
+      isLoading = true;
+    });
     if (retryCount > 1) {
       throw Exception("Exceeded maximum retry attempts");
     }
@@ -225,6 +217,7 @@ class _HomePageState extends State<HomePage> {
       if (response.statusCode == 200) {
         var utf8Body = utf8.decode(response.bodyBytes);
         List<dynamic> jsonData = json.decode(utf8Body);
+        todos = jsonData.map((json) => ITodo.fromJson(json)).toList();
         setState(() {
           todos = jsonData.map((json) => ITodo.fromJson(json)).toList();
           isLoading = false;
@@ -424,6 +417,98 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
+  Future<void> resetEveryday() async {
+    const url = "https://backend.apot.pro/api/v1/todos";
+
+    try {
+      // jwt
+      const storage = FlutterSecureStorage();
+      String? accessToken = await storage.read(key: "access_token");
+
+      if (accessToken == null) {
+        String? refreshToken = await storage.read(key: "refresh_token");
+        if (refreshToken == null) {
+          await FlutterLocalNotification.showNotification(
+              401, 'RF Fired', 'you should re-login');
+        }
+      }
+
+      // putting
+      for (var everyday in todos[todoIndex].everydays) {
+        try {
+          var response = await http.put(
+            Uri.parse(url),
+            body: json.encode({
+              'name': everyday.name,
+              'time': everyday.time,
+              'done': false,
+            }),
+            headers: {
+              'Jwt': '$accessToken',
+              'Content-Type': 'application/json',
+            },
+          );
+          if (response.statusCode == 200) {
+            setState(() {
+              everyday.done = false;
+            });
+            await FlutterLocalNotification.showNotification(
+                13, 'reset succeed', "all everydays' set false");
+          }
+          if (response.statusCode == 401) {
+            retryCount++;
+            await storage.delete(key: "access_token");
+            var refreshToken = await storage.read(key: 'refresh_token');
+            const String url =
+                "https://backend.apot.pro/api/v1/users/refresh-at";
+            try {
+              var response = await http.post(
+                Uri.parse(url),
+                body: json.encode({"refresh_token": refreshToken}),
+                headers: {'Content-Type': 'application/json'},
+              );
+              if (response.statusCode == 200) {
+                Map<String, dynamic> newAcData = json.decode(response.body);
+                var newAccessToken = newAcData["access_token"];
+                try {
+                  await storage.write(
+                      key: "access_token", value: newAccessToken);
+                  setState(() {
+                    isLoading = false;
+                  });
+                } catch (e) {
+                  print('Error occured on putting done at AT');
+                  setState(() {
+                    isLoading = false;
+                  });
+                  throw Exception('Error occured on putting done at AT');
+                }
+              }
+            } catch (e) {
+              print(
+                  "Failed to refresh AT on resetting everyday with $e, status: ${response.statusCode}");
+              setState(() {
+                isLoading = false;
+              });
+            }
+          } else {
+            print('Error occurred with status ${response.statusCode}');
+            await FlutterLocalNotification.showNotification(14, 'reset failed',
+                "|${response.statusCode}| ${response.body}");
+          }
+        } catch (e) {
+          print('Failed to change done with $e');
+          await FlutterLocalNotification.showNotification(
+              14, 'reset failed', "$e");
+        }
+      }
+    } catch (e) {
+      print('error occured trying to reset everyday e: $e');
+      await FlutterLocalNotification.showNotification(
+          14, 'reset failed on trying', "$e");
+    }
+  }
+
   @override
   void initState() {
     loadAndSetData();
@@ -440,178 +525,177 @@ class _HomePageState extends State<HomePage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        backgroundColor: Theme.of(context).colorScheme.inversePrimary,
-        title: Text(widget.title),
-        actions: <Widget>[
-          Padding(
-              padding: const EdgeInsets.fromLTRB(0, 0, 20, 0),
-              child: isRunningGet
-                  ? IconButton(
-                      iconSize: 34,
-                      onPressed: () {
-                        FlutterLocalNotification.showNotification(
-                            1, "test", "test message for debugging");
-                      },
-                      icon: const Icon(Icons.toggle_on_rounded),
-                    )
-                  : IconButton(
-                      iconSize: 34,
-                      onPressed: () {
-                        FlutterLocalNotification.showNotification(
-                            1, "test", "test message for debugging");
-                      },
-                      icon: const Icon(Icons.toggle_off_outlined),
-                    ))
-        ],
-      ),
-      body: isLoading
-          ? const Center(child: CircularProgressIndicator())
-          : todos.isEmpty
-              ? const Center(child: Text('No todos'))
-              : Center(
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.spaceAround,
-                    children: <Widget>[
-                      Padding(
-                        padding: const EdgeInsets.fromLTRB(20, 10, 20, 0),
-                        child: SizedBox(
-                          // top manual
-                          child: Row(
-                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                            crossAxisAlignment: CrossAxisAlignment.center,
-                            children: [
-                              ElevatedButton(
-                                  style: ElevatedButton.styleFrom(
-                                      backgroundColor: Colors.green[100]),
-                                  onPressed: () => {
-                                        todoIndexPopup(
-                                            context,
-                                            List.generate(
-                                                todos.length, (index) => index))
-                                      },
-                                  child: const Padding(
-                                    padding: EdgeInsets.fromLTRB(0, 0, 0, 0),
-                                    child: Icon(Icons.menu),
-                                  )),
-                              Text(
-                                todos[todoIndex].name,
-                                style: const TextStyle(fontSize: 20),
-                              ),
-                              ElevatedButton(
-                                // swiping E and P
-                                style: ElevatedButton.styleFrom(
-                                    backgroundColor: Colors.green[100]),
-                                onPressed: () => setState(() {
-                                  EorP == 0 ? EorP = 1 : EorP = 0;
-                                }),
-                                child: Row(
-                                  children: [
-                                    const Padding(
-                                      padding: EdgeInsets.fromLTRB(0, 0, 0, 0),
-                                      child: Icon(Icons.change_circle_outlined),
+        appBar: AppBar(
+          backgroundColor: Theme.of(context).colorScheme.inversePrimary,
+          title: Text(widget.title),
+          actions: <Widget>[
+            Padding(
+                padding: const EdgeInsets.fromLTRB(0, 0, 20, 0),
+                child: IconButton(
+                  iconSize: 34,
+                  onPressed: () {
+                    FlutterLocalNotification.showNotification(
+                        1, "test", "test message for debugging");
+                  },
+                  icon: const Icon(Icons.toggle_on_rounded),
+                ))
+          ],
+        ),
+        body: RefreshIndicator(
+          onRefresh: getTodos,
+          child: isLoading
+              ? const Center(child: CircularProgressIndicator())
+              : todos.isEmpty
+                  ? const Center(child: Text('No todos'))
+                  : Center(
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.spaceAround,
+                        children: <Widget>[
+                          Padding(
+                            padding: const EdgeInsets.fromLTRB(20, 10, 20, 0),
+                            child: SizedBox(
+                              // top manual
+                              child: Row(
+                                mainAxisAlignment:
+                                    MainAxisAlignment.spaceBetween,
+                                crossAxisAlignment: CrossAxisAlignment.center,
+                                children: [
+                                  ElevatedButton(
+                                      style: ElevatedButton.styleFrom(
+                                          backgroundColor: Colors.green[100]),
+                                      onPressed: () => {
+                                            todoIndexPopup(
+                                                context,
+                                                List.generate(todos.length,
+                                                    (index) => index))
+                                          },
+                                      child: const Padding(
+                                        padding:
+                                            EdgeInsets.fromLTRB(0, 0, 0, 0),
+                                        child: Icon(Icons.menu),
+                                      )),
+                                  Text(
+                                    todos[todoIndex].name,
+                                    style: const TextStyle(fontSize: 20),
+                                  ),
+                                  ElevatedButton(
+                                    // swiping E and P
+                                    style: ElevatedButton.styleFrom(
+                                        backgroundColor: Colors.green[100]),
+                                    onPressed: () => setState(() {
+                                      EorP == 0 ? EorP = 1 : EorP = 0;
+                                    }),
+                                    child: Row(
+                                      children: [
+                                        const Padding(
+                                          padding:
+                                              EdgeInsets.fromLTRB(0, 0, 0, 0),
+                                          child: Icon(
+                                              Icons.change_circle_outlined),
+                                        ),
+                                        const SizedBox(width: 8),
+                                        Text(
+                                          EorP == 0 ? "E" : "P",
+                                          style: const TextStyle(fontSize: 20),
+                                        )
+                                      ],
                                     ),
-                                    const SizedBox(width: 8),
-                                    Text(
-                                      EorP == 0 ? "E" : "P",
-                                      style: const TextStyle(fontSize: 20),
-                                    )
-                                  ],
-                                ),
-                              )
-                            ],
+                                  )
+                                ],
+                              ),
+                            ),
                           ),
-                        ),
-                      ),
-                      Expanded(
-                        child: Container(
-                          color: Colors.white,
-                          padding: const EdgeInsets.fromLTRB(10, 10, 10, 0),
-                          alignment: Alignment.center,
-                          child: ListView.builder(
-                            itemCount: isLoading
-                                ? 0
-                                : EorP == 0
-                                    ? todos[todoIndex].everydays.length
-                                    : todos[todoIndex].plans.length,
-                            itemBuilder: (BuildContext context, int index) {
-                              return Container(
-                                padding: const EdgeInsets.all(10),
-                                alignment: Alignment.center,
-                                child: ElevatedButton(
-                                  // E and P buttons
-                                  style: ElevatedButton.styleFrom(
-                                    padding:
-                                        const EdgeInsets.fromLTRB(10, 4, 4, 4),
-                                    minimumSize: const Size(100, 55),
+                          Expanded(
+                            child: Container(
+                              color: Colors.white,
+                              padding: const EdgeInsets.fromLTRB(10, 10, 10, 0),
+                              alignment: Alignment.center,
+                              child: ListView.builder(
+                                itemCount: isLoading
+                                    ? 0
+                                    : EorP == 0
+                                        ? todos[todoIndex].everydays.length
+                                        : todos[todoIndex].plans.length,
+                                itemBuilder: (BuildContext context, int index) {
+                                  return Container(
+                                    padding: const EdgeInsets.all(10),
                                     alignment: Alignment.center,
-                                    backgroundColor: EorP == 0
-                                        ? todos[todoIndex]
-                                                    .everydays[index]
-                                                    .done ==
-                                                true
-                                            ? Colors.blue[400]
-                                            : Colors.red[400]
-                                        : todos[todoIndex].plans[index].done ==
-                                                true
-                                            ? Colors.blue[400]
-                                            : Colors.red[400],
-                                  ),
-                                  onPressed: () {
-                                    putDone(index);
-                                  },
-                                  child: Row(
-                                    mainAxisAlignment:
-                                        MainAxisAlignment.spaceBetween,
-                                    children: [
-                                      TextButton(
-                                        // E&P detail menu button
-                                        style: ElevatedButton.styleFrom(
-                                          backgroundColor: Colors.white,
-                                        ),
-                                        onPressed: () {
-                                          showPopup(context, index);
-                                        },
-                                        child: const Icon(Icons.menu),
-                                      ),
-                                      Text(
-                                        EorP == 0
+                                    child: ElevatedButton(
+                                      // E and P buttons
+                                      style: ElevatedButton.styleFrom(
+                                        padding: const EdgeInsets.fromLTRB(
+                                            10, 4, 4, 4),
+                                        minimumSize: const Size(100, 55),
+                                        alignment: Alignment.center,
+                                        backgroundColor: EorP == 0
                                             ? todos[todoIndex]
-                                                .everydays[index]
-                                                .name
+                                                        .everydays[index]
+                                                        .done ==
+                                                    true
+                                                ? Colors.blue[400]
+                                                : Colors.red[400]
                                             : todos[todoIndex]
-                                                .plans[index]
-                                                .name,
-                                        style: const TextStyle(
-                                          fontSize: 20,
-                                          fontWeight: FontWeight.w700,
-                                          color: Colors.white,
-                                        ),
-                                        overflow: TextOverflow.ellipsis,
+                                                        .plans[index]
+                                                        .done ==
+                                                    true
+                                                ? Colors.blue[400]
+                                                : Colors.red[400],
                                       ),
-                                      const SizedBox()
-                                    ],
-                                  ),
-                                ),
-                              );
-                            },
+                                      onPressed: () {
+                                        putDone(index);
+                                      },
+                                      child: Row(
+                                        mainAxisAlignment:
+                                            MainAxisAlignment.spaceBetween,
+                                        children: [
+                                          TextButton(
+                                            // E&P detail menu button
+                                            style: ElevatedButton.styleFrom(
+                                              backgroundColor: Colors.white,
+                                            ),
+                                            onPressed: () {
+                                              showPopup(context, index);
+                                            },
+                                            child: const Icon(Icons.menu),
+                                          ),
+                                          Text(
+                                            EorP == 0
+                                                ? todos[todoIndex]
+                                                    .everydays[index]
+                                                    .name
+                                                : todos[todoIndex]
+                                                    .plans[index]
+                                                    .name,
+                                            style: const TextStyle(
+                                              fontSize: 20,
+                                              fontWeight: FontWeight.w700,
+                                              color: Colors.white,
+                                            ),
+                                            overflow: TextOverflow.ellipsis,
+                                          ),
+                                          const SizedBox()
+                                        ],
+                                      ),
+                                    ),
+                                  );
+                                },
+                              ),
+                            ),
                           ),
-                        ),
+                        ],
                       ),
-                    ],
-                  ),
-                ),
-      // floatingActionButton: FloatingActionButton(
-      //   onPressed: () {
-      //     Navigator.push(
-      //       context,
-      //       MaterialPageRoute(
-      //           builder: (context) => const SavePage(title: "Saved")),
-      //     );
-      //   },
-      //   tooltip: 'Fetch',
-      //   child: const Icon(Icons.save_alt),
-      // ),
-    );
+                    ),
+          // floatingActionButton: FloatingActionButton(
+          //   onPressed: () {
+          //     Navigator.push(
+          //       context,
+          //       MaterialPageRoute(
+          //           builder: (context) => const SavePage(title: "Saved")),
+          //     );
+          //   },
+          //   tooltip: 'Fetch',
+          //   child: const Icon(Icons.save_alt),
+          // ),,)
+        ));
   }
 }
